@@ -320,6 +320,7 @@ else:
                             st.session_state.free_credits,
                             st.session_state.activation_date
                         )
+                        st.rerun()
 
                 except Exception as api_err:
                     st.error("❌ Gemini is temporarily unavailable or the request could not be completed.")
