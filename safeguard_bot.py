@@ -1,160 +1,216 @@
-import streamlit as st
 import os
-import datetime
-import requests
+import re
 import base64
+import datetime as dt
+import requests
+import streamlit as st
 
-# =====================================================================================
-# ⚙️ MASTER BUSINESS & ADMINISTRATIVE GLOBAL SETTINGS
-# =====================================================================================
+st.set_page_config(page_title="Campus Safeguard | DigiNebula", layout="centered")
+
 PREMIUM_DURATION_DAYS = 90
-
-# API keys are stored in .streamlit/secrets.toml, never in this source file.
-# The app tries Key 1 first, then Key 2 if the request fails.
-def get_gemini_api_keys():
-    keys = []
-    for name in ("GEMINI_API_KEY_1", "GEMINI_API_KEY_2"):
-        try:
-            value = st.secrets.get(name, "")
-        except Exception:
-            value = ""
-        if value and value not in keys:
-            keys.append(value)
-
-    # Backward compatibility with an existing single key if configured.
-    try:
-        old_key = st.secrets.get("GEMINI_API_KEY", "")
-    except Exception:
-        old_key = os.getenv("GEMINI_API_KEY", "")
-    if old_key and old_key not in keys:
-        keys.append(old_key)
-    return keys
-
-try:
-    YOUR_PERSONAL_UPI_ID = st.secrets.get("UPI_ID", "YOUR_UPI_ID")
-except Exception:
-    YOUR_PERSONAL_UPI_ID = os.getenv("UPI_ID", "YOUR_UPI_ID")
-SUBSCRIPTION_PRICE = "9"
+SUBSCRIPTION_PRICE = 9
 COMPANY_NAME = "DigiNebula"
-GEMINI_MODEL = "gemini-3.8-flash"  # Change to a model ID enabled for your API projects.
+GEMINI_MODEL = "gemini-3.8-flash"  # Keep your configured model; verify it is enabled for your API project.
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 
-def generate_with_key_fallback(contents_payload):
-    """Try both configured Gemini keys. Timeout and transient HTTP errors trigger fallback."""
-    api_keys = get_gemini_api_keys()
-    if not api_keys:
-        raise RuntimeError(
-            "No Gemini API key configured. Add GEMINI_API_KEY_1 and GEMINI_API_KEY_2 "
-            "to .streamlit/secrets.toml."
-        )
+def secret(name, default=""):
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return os.getenv(name, default)
 
-    payload = {"contents": [{"parts": contents_payload}]}
+
+SUPABASE_URL = secret("SUPABASE_URL").rstrip("/")
+SUPABASE_KEY = secret("SUPABASE_KEY") or secret("SUPABASE_ANON_KEY")
+SUPABASE_SERVICE_ROLE_KEY = secret("SUPABASE_SERVICE_ROLE_KEY")
+ADMIN_PASSWORD = secret("ADMIN_PASSWORD")
+UPI_ID = secret("UPI_ID", "YOUR_UPI_ID")
+
+
+def supabase_request(method, path, token=None, service=False, params=None, payload=None, prefer=None):
+    key = SUPABASE_SERVICE_ROLE_KEY if service else SUPABASE_KEY
+    if not SUPABASE_URL or not key:
+        raise RuntimeError("Supabase settings are missing. Check Streamlit Secrets.")
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {token or key}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    response = requests.request(
+        method, f"{SUPABASE_URL}/rest/v1/{path}", headers=headers,
+        params=params, json=payload, timeout=20
+    )
+    if not response.ok:
+        # Do not expose database response bodies or credentials in the UI.
+        raise RuntimeError(f"Supabase request failed (HTTP {response.status_code}). Check schema and RLS policies.")
+    return response.json() if response.text else None
+
+
+def auth_request(endpoint, payload):
+    response = requests.post(
+        f"{SUPABASE_URL}/auth/v1/{endpoint}",
+        headers={"apikey": SUPABASE_KEY, "Content-Type": "application/json"},
+        json=payload, timeout=20
+    )
+    if not response.ok:
+        try:
+            message = response.json().get("msg") or response.json().get("message")
+        except Exception:
+            message = None
+        raise RuntimeError(message or f"Authentication failed (HTTP {response.status_code}).")
+    return response.json()
+
+
+def get_profile(user_id, token):
+    rows = supabase_request(
+        "GET", "profiles", token=token,
+        params={"select": "user_id,free_credits,premium_until", "user_id": f"eq.{user_id}", "limit": "1"}
+    )
+    if not rows:
+        raise RuntimeError("Profile not found. Run the SQL migration below, then log out and log in again.")
+    return rows[0]
+
+
+def is_premium(profile):
+    value = profile.get("premium_until")
+    if not value:
+        return False
+    try:
+        expiry = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=dt.timezone.utc)
+        return expiry > dt.datetime.now(dt.timezone.utc)
+    except (ValueError, TypeError):
+        return False
+
+
+def consume_credit(token):
+    result = supabase_request("POST", "rpc/consume_credit", token=token, payload={})
+    if isinstance(result, int):
+        if result < 0:
+            raise RuntimeError("No free credits remain.")
+        return result
+    raise RuntimeError("Credit function returned an unexpected result. Run the SQL migration.")
+
+
+def get_gemini_api_keys():
+    keys = []
+    for name in ("GEMINI_API_KEY_1", "GEMINI_API_KEY_2", "GEMINI_API_KEY"):
+        value = secret(name)
+        if value and value not in keys:
+            keys.append(value)
+    return keys
+
+
+def generate_with_key_fallback(parts):
+    keys = get_gemini_api_keys()
+    if not keys:
+        raise RuntimeError("Add GEMINI_API_KEY_1 or GEMINI_API_KEY_2 to Streamlit Secrets.")
     errors = []
-
-    for index, api_key in enumerate(api_keys, start=1):
+    payload = {"contents": [{"parts": parts}]}
+    for number, key in enumerate(keys, start=1):
         try:
             response = requests.post(
                 GEMINI_URL,
-                headers={
-                    "Content-Type": "application/json",
-                    "x-goog-api-key": api_key,
-                },
-                json=payload,
-                timeout=(10, 90),
+                headers={"Content-Type": "application/json", "x-goog-api-key": key},
+                json=payload, timeout=(10, 90)
             )
             if response.status_code in (408, 429, 500, 502, 503, 504):
-                errors.append(f"Key {index}: HTTP {response.status_code}")
+                errors.append(f"Key {number}: HTTP {response.status_code}")
                 continue
-            response.raise_for_status()
+            if not response.ok:
+                errors.append(f"Key {number}: HTTP {response.status_code}")
+                continue
             return response.json()
-        except requests.exceptions.Timeout:
-            errors.append(f"Key {index}: request timed out")
-        except requests.exceptions.ConnectionError:
-            errors.append(f"Key {index}: connection error")
-        except requests.exceptions.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else "unknown"
-            # Avoid printing response bodies that could contain sensitive details.
-            errors.append(f"Key {index}: HTTP {status}")
-            # Try the other key for this request as well.
         except requests.exceptions.RequestException as exc:
-            errors.append(f"Key {index}: network request failed ({type(exc).__name__})")
+            errors.append(f"Key {number}: {type(exc).__name__}")
         except ValueError:
-            errors.append(f"Key {index}: server returned invalid JSON")
+            errors.append(f"Key {number}: invalid JSON")
+    raise RuntimeError("Gemini requests failed. " + "; ".join(errors))
 
-    raise RuntimeError("All configured Gemini keys failed. " + "; ".join(errors))
 
-# =====================================================================================
-# 🧠 AI ENGINE RULES INFRASTRUCTURE
-# =====================================================================================
-PROMPT_INSTRUCTION = (
-    "You are the DigiNebula AI engine. Your task is to process the user's uploaded assignment—which may be "
-    "provided as raw text, a programming code block, or a photograph of handwritten notebook pages (including math, "
-    "science, Hindi, or engineering code).\n"
-    "1. If an image is provided, perform high-precision OCR to read the handwriting or code cleanly.\n"
-    "2. Rewrite the vocabulary, sentence layout, formatting, or variable names while preserving the original meaning.\n"
-    "3. CRITICAL FOR ALL SUBJECTS:\n"
-    "   - For Coding: Change variable names or structure when appropriate while preserving correct logic.\n"
-    "   - For Math/Science: Keep core formulas, numerical derivations, and constants identical.\n"
-    "   - For Hindi/Theory: Rewrite using contextual synonyms while maintaining the exact original meaning.\n"
-    "4. Reply ONLY with the final rewritten text or code."
+PROMPT = (
+    "Rewrite the user's assignment, code, or handwritten notes while preserving meaning and correctness. "
+    "Read images carefully. Keep mathematical formulas, constants, and derivations correct. "
+    "For code, preserve intended logic. Reply only with the final rewritten text or code."
 )
 
-# =====================================================================================
-# 💾 PERSISTENT FILE-BASED DATABASE STORAGE ENGINE (LOCAL MACHINE LAYER)
-# =====================================================================================
-DB_FILE = "database.txt"
+
+def submit_payment(user_id, token, utr):
+    if not re.fullmatch(r"[A-Za-z0-9]{8,30}", utr):
+        raise ValueError("Enter a transaction reference containing 8–30 letters or digits.")
+    # The unique database constraint prevents a UTR from being reused.
+    supabase_request(
+        "POST", "payments", token=token,
+        payload={"user_id": user_id, "utr": utr, "amount": SUBSCRIPTION_PRICE, "status": "pending"},
+        prefer="return=minimal"
+    )
 
 
-def load_user_database():
-    if not os.path.exists(DB_FILE):
-        return {"free_credits": 3, "activation_date": "None"}
+def get_payment_history(user_id, token):
+    return supabase_request(
+        "GET", "payments", token=token,
+        params={"select": "utr,amount,status,created_at", "user_id": f"eq.{user_id}",
+                "order": "created_at.desc", "limit": "10"}
+    )
+
+
+def review_payment(utr, approve):
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("Admin review is not configured.")
+    if not re.fullmatch(r"[A-Za-z0-9]{8,30}", utr):
+        raise ValueError("Enter a valid UTR.")
+    # One database RPC performs payment status and premium updates in a single transaction.
+    rpc = "admin_approve_payment" if approve else "admin_reject_payment"
+    supabase_request("POST", f"rpc/{rpc}", service=True, payload={"p_utr": utr})
+
+
+# -------------------- SESSION --------------------
+for key, default in {
+    "access_token": "", "refresh_token": "", "user_id": "", "email": "",
+    "processed_output": "", "output_language": "text", "admin_authenticated": False,
+    "admin_login_attempts": 0, "admin_locked_until": None,
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+
+def sign_out():
+    for key in ("access_token", "refresh_token", "user_id", "email", "processed_output"):
+        st.session_state[key] = ""
+    st.rerun()
+
+
+def refresh_session_if_needed():
+    token = st.session_state.access_token
+    refresh = st.session_state.refresh_token
+    if not token or not refresh:
+        return
+    # Refresh proactively when the JWT is near expiry; if parsing fails, leave it to API response.
     try:
-        with open(DB_FILE, "r") as f:
-            lines = f.read().splitlines()
-            if len(lines) >= 2:
-                return {"free_credits": int(lines[0]), "activation_date": lines[1]}
-    except:
-        pass
-    return {"free_credits": 3, "activation_date": "None"}
+        import json
+        segment = token.split(".")[1]
+        segment += "=" * (-len(segment) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(segment.encode()).decode()).get("exp", 0)
+        if exp > int(dt.datetime.now(dt.timezone.utc).timestamp()) + 60:
+            return
+    except Exception:
+        return
+    data = auth_request("token?grant_type=refresh_token", {"refresh_token": refresh})
+    st.session_state.access_token = data["access_token"]
+    st.session_state.refresh_token = data.get("refresh_token", refresh)
+    if data.get("user"):
+        st.session_state.user_id = data["user"]["id"]
+        st.session_state.email = data["user"].get("email", st.session_state.email)
 
 
-def save_user_database(credits_count, activation_date_str):
-    with open(DB_FILE, "w") as f:
-        f.write(f"{credits_count}\n{activation_date_str}")
-
-
-user_data = load_user_database()
-if "free_credits" not in st.session_state:
-    st.session_state.free_credits = user_data["free_credits"]
-if "activation_date" not in st.session_state:
-    st.session_state.activation_date = user_data["activation_date"]
-if "processed_output" not in st.session_state:
-    st.session_state.processed_output = ""
-if "output_language" not in st.session_state:
-    st.session_state.output_language = "text"
-
-is_currently_premium = False
-
-if st.session_state.activation_date != "None":
-    try:
-        activation_time = datetime.datetime.strptime(
-            st.session_state.activation_date, "%Y-%m-%d %H:%M:%S"
-        )
-        time_elapsed = datetime.datetime.now() - activation_time
-        if time_elapsed.days < PREMIUM_DURATION_DAYS:
-            is_currently_premium = True
-        else:
-            st.session_state.activation_date = "None"
-            st.session_state.free_credits = 0
-            save_user_database(0, "None")
-    except:
-        pass
-
-# =====================================================================================
-# 🎨 WEB SYSTEM DISPLAY WINDOW (CHROME ENGINE LAYOUT)
-# =====================================================================================
-st.set_page_config(page_title="Campus Safeguard | DigiNebula", layout="centered")
+# -------------------- PAGE --------------------
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("Set SUPABASE_URL and SUPABASE_KEY in Streamlit Secrets.")
+    st.stop()
 
 if os.path.exists("logo.png"):
     st.image("logo.png", width=180)
@@ -162,174 +218,190 @@ elif os.path.exists("logo.png.png"):
     st.image("logo.png.png", width=180)
 
 st.title("Campus Safeguard")
-st.caption("🚀 An Advanced Multimodal Web App powered by DigiNebula AI Systems")
-st.markdown("---")
+st.caption("An AI-powered assignment rewriting tool by DigiNebula")
+st.divider()
 
-if st.session_state.free_credits <= 0 and not is_currently_premium:
-    st.error("⚠️ **Free Access Limits Exhausted!**")
-    st.markdown(
-        f"### Unlock DigiNebula Premium for the Whole Semester Cycle\n"
-        f"You have used up all your complimentary trial parses. Upgrade right now to get **unlimited submissions** "
-        f"for the next **{PREMIUM_DURATION_DAYS} Days**."
-    )
-
-    upi_intent_string = (
-        f"upi://pay?pa={YOUR_PERSONAL_UPI_ID}&pn={COMPANY_NAME}"
-        f"&am={SUBSCRIPTION_PRICE}&cu=INR"
-    )
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("#### 📱 Mobile App Link:")
-        st.markdown(
-            f'<a href="{upi_intent_string}" style="display: inline-block; padding: 12px 24px; '
-            f'background-color: #7928CA; color: white; text-align: center; text-decoration: none; '
-            f'font-weight: bold; border-radius: 8px; width: 100%;">⚡ Tap Here to Pay (GPay/PhonePe)</a>',
-            unsafe_allow_html=True
-        )
-
-    with col2:
-        st.markdown("#### 💻 Desktop/Laptop QR Scan:")
-        st.warning(
-            f"🔹 **Amount:** ₹{SUBSCRIPTION_PRICE}\n"
-            f"🔹 **UPI ID:** `{YOUR_PERSONAL_UPI_ID}`"
-        )
-
-    st.markdown("---")
-    st.markdown("### 📥 Activation Validation")
-    utr_number = st.text_input(
-        "Enter your 12-digit UPI Transaction Ref Number / UTR below after making payment:",
-        placeholder="e.g. 629481039572"
-    )
-
-    st.caption("Note: Entering a UTR checks only its format; it does not independently verify that payment was received.")
-
-    if st.button("🔓 Verify Payment & Activate System", type="secondary"):
-        if len(utr_number.strip()) == 12 and utr_number.isdigit():
-            timestamp_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            st.session_state.activation_date = timestamp_now
-            st.session_state.free_credits = 999999
-            save_user_database(999999, timestamp_now)
-            st.success(
-                f"🌟 **Account Activated for {PREMIUM_DURATION_DAYS} Days!**"
-            )
-            st.rerun()
+if not st.session_state.access_token:
+    st.subheader("Account")
+    mode = st.radio("Choose an option", ["Log in", "Create account"], horizontal=True)
+    with st.form("auth_form"):
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button(mode, type="primary")
+    if submitted:
+        if not email.strip() or not password:
+            st.error("Enter your email and password.")
         else:
-            st.error(
-                "❌ Invalid UTR parameters. Please paste a valid 12-digit numeric bank code."
-            )
-
-else:
-    uploaded_file = st.file_uploader(
-        "📸 Drop a notebook photo or upload your assignment file here:",
-        type=["py", "java", "cpp", "txt", "png", "jpg", "jpeg", "pdf"]
-    )
-
-    user_input = st.text_area(
-        "📝 Or, paste your assignment text/code manually below if not using a file/image:",
-        placeholder="Drop text here...",
-        height=150
-    )
-
-    if not is_currently_premium:
-        st.info(
-            f"📊 Account Status: Free Launch Batch "
-            f"({st.session_state.free_credits} Free Credits Remaining)"
-        )
-    else:
-        st.success(
-            f"🌟 Account Status: Corporate Premium Pass "
-            f"(Active for {PREMIUM_DURATION_DAYS} Days)"
-        )
-
-    if st.button("📤 Rewrite & Clear Plagiarism", type="primary"):
-        contents_payload = []
-
-        # Inject structural API layout
-        contents_payload.append({"text": PROMPT_INSTRUCTION})
-
-        if uploaded_file is not None:
-            file_extension = uploaded_file.name.split(".")[-1].lower()
-
-            # Process images and PDFs as inline file data
-            if file_extension in ["png", "jpg", "jpeg", "pdf"]:
-                try:
-                    file_bytes = uploaded_file.read()
-                    encoded_file = base64.b64encode(file_bytes).decode("utf-8")
-                    if file_extension == "pdf":
-                        mime_type = "application/pdf"
+            try:
+                if mode == "Create account":
+                    data = auth_request("signup", {"email": email.strip(), "password": password})
+                    if not data.get("access_token"):
+                        st.success("Account created. Confirm your email if required, then log in.")
                     else:
-                        mime_type = f"image/{'jpeg' if file_extension == 'jpg' else file_extension}"
-
-                    contents_payload.append({
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": encoded_file
-                        }
-                    })
-                except Exception as file_err:
-                    st.error(f"❌ File processing error: {file_err}")
-
-            # Process plain text and code files
-            else:
-                try:
-                    text_data = uploaded_file.read().decode("utf-8")
-                    contents_payload.append({"text": text_data})
-                except Exception as txt_err:
-                    st.error(f"❌ Text decode error: {txt_err}")
-
-        if user_input.strip():
-            contents_payload.append({"text": user_input.strip()})
-
-        if len(contents_payload) <= 1:
-            st.warning(
-                "⚠️ Please upload a file/image or enter text strings before triggering AI engines."
-            )
-        else:
-            with st.spinner(
-                "🌌 DigiNebula engines are processing your assignment..."
-            ):
-                try:
-                    response_json = generate_with_key_fallback(contents_payload)
-
-                    # Safely parse the generated text
-                    candidates = response_json.get("candidates", [])
-                    if not candidates:
-                        api_message = response_json.get("error", {}).get("message", "")
-                        if api_message:
-                            raise ValueError(f"Gemini returned no text candidate: {api_message}")
-                        raise ValueError("Gemini returned no text candidate. Try a different file or prompt.")
-
-                    parts = candidates[0].get("content", {}).get("parts", [])
-                    output_text = "\n".join(
-                        part["text"] for part in parts if "text" in part
-                    ).strip()
-                    if not output_text:
-                        raise ValueError("Gemini returned an empty result. Please try again.")
-
-                    st.session_state.processed_output = output_text
-                    st.session_state.output_language = (
-                        file_extension
-                        if uploaded_file is not None and file_extension in ["py", "java", "cpp"]
-                        else "markdown"
-                    )
-
-                    if not is_currently_premium:
-                        st.session_state.free_credits = max(0, st.session_state.free_credits - 1)
-                        save_user_database(
-                            st.session_state.free_credits,
-                            st.session_state.activation_date
-                        )
+                        st.session_state.access_token = data["access_token"]
+                        st.session_state.refresh_token = data.get("refresh_token", "")
+                        st.session_state.user_id = data["user"]["id"]
+                        st.session_state.email = data["user"].get("email", email.strip())
                         st.rerun()
+                else:
+                    data = auth_request("token?grant_type=password", {"email": email.strip(), "password": password})
+                    st.session_state.access_token = data["access_token"]
+                    st.session_state.refresh_token = data.get("refresh_token", "")
+                    st.session_state.user_id = data["user"]["id"]
+                    st.session_state.email = data["user"].get("email", email.strip())
+                    st.rerun()
+            except Exception as exc:
+                st.error(f"Could not {mode.lower()}: {exc}")
+    st.stop()
 
-                except Exception as api_err:
-                    st.error("❌ Gemini is temporarily unavailable or the request could not be completed.")
-                    st.caption(str(api_err))
+try:
+    refresh_session_if_needed()
+except Exception:
+    sign_out()
 
-    # Keep the latest processed result visible on subsequent Streamlit reruns
-    if st.session_state.processed_output:
-        st.markdown("### 📥 Processed Output:")
-        st.code(
-            st.session_state.processed_output,
-            language=st.session_state.output_language
-        )
+st.caption(f"Signed in as {st.session_state.email}")
+if st.button("Log out"):
+    sign_out()
+
+try:
+    profile = get_profile(st.session_state.user_id, st.session_state.access_token)
+except Exception as exc:
+    st.error(f"Could not load profile: {exc}")
+    st.info("Confirm the SQL migration has run. If your session is old, log out and log in again.")
+    st.stop()
+
+premium = is_premium(profile)
+credits = int(profile.get("free_credits", 0))
+
+# -------------------- PAYMENT SCREEN --------------------
+if not premium and credits <= 0:
+    st.error("Your free credits have been used.")
+    st.subheader(f"Premium access — ₹{SUBSCRIPTION_PRICE} for {PREMIUM_DURATION_DAYS} days")
+    st.write("Pay by UPI. Premium is activated only after manual payment verification.")
+    upi_url = f"upi://pay?pa={UPI_ID}&pn={COMPANY_NAME}&am={SUBSCRIPTION_PRICE}&cu=INR"
+    st.markdown(f"[Pay ₹{SUBSCRIPTION_PRICE} using your UPI app]({upi_url})")
+    st.write(f"UPI ID: `{UPI_ID}`")
+    with st.form("payment_form"):
+        utr = st.text_input("UPI transaction reference / UTR")
+        payment_submitted = st.form_submit_button("Submit for manual approval")
+    if payment_submitted:
+        try:
+            submit_payment(st.session_state.user_id, st.session_state.access_token, utr.strip())
+            st.success("Payment reference submitted. Premium remains locked until approved.")
+        except Exception as exc:
+            st.error(f"Payment submission failed: {exc}. A duplicate UTR may already exist.")
+    st.subheader("Recent payment submissions")
+    try:
+        history = get_payment_history(st.session_state.user_id, st.session_state.access_token)
+        if history:
+            st.dataframe(history, use_container_width=True, hide_index=True)
+        else:
+            st.caption("No payment submissions yet.")
+    except Exception as exc:
+        st.warning(f"Could not load payment history: {exc}")
+    st.stop()
+
+# -------------------- ASSIGNMENT REWRITER --------------------
+st.success(f"Premium active until {profile.get('premium_until')}") if premium else st.info(f"Free credits remaining: {credits}")
+uploaded = st.file_uploader("Upload assignment, code, photo, or PDF", type=["py", "java", "cpp", "txt", "png", "jpg", "jpeg", "pdf"])
+typed = st.text_area("Or paste assignment text/code", height=150)
+
+if st.button("Rewrite assignment", type="primary"):
+    parts = [{"text": PROMPT}]
+    extension = ""
+    has_input = False
+    if uploaded is not None:
+        extension = uploaded.name.rsplit(".", 1)[-1].lower()
+        raw = uploaded.read()
+        if extension in ("png", "jpg", "jpeg", "pdf"):
+            mime = "application/pdf" if extension == "pdf" else ("image/jpeg" if extension in ("jpg", "jpeg") else "image/png")
+            parts.append({"inline_data": {"mime_type": mime, "data": base64.b64encode(raw).decode("utf-8")}})
+        else:
+            try:
+                parts.append({"text": raw.decode("utf-8")})
+            except UnicodeDecodeError:
+                st.error("The uploaded text/code file is not UTF-8 encoded.")
+                st.stop()
+        has_input = True
+    if typed.strip():
+        parts.append({"text": typed.strip()})
+        has_input = True
+    if not has_input:
+        st.warning("Upload a file or enter text first.")
+    else:
+        # Reserve/deduct a free credit before calling Gemini to prevent concurrent free use.
+        credit_reserved = False
+        try:
+            if not premium:
+                remaining = consume_credit(st.session_state.access_token)
+                credit_reserved = True
+                credits = remaining
+            with st.spinner("DigiNebula is processing your submission..."):
+                result = generate_with_key_fallback(parts)
+                candidates = result.get("candidates", [])
+                response_parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+                output = "\n".join(p["text"] for p in response_parts if isinstance(p, dict) and "text" in p).strip()
+                if not output:
+                    detail = result.get("error", {}).get("message", "")
+                    raise RuntimeError(detail or "Gemini returned no text. Try again.")
+                st.session_state.processed_output = output
+                st.session_state.output_language = extension if extension in ("py", "java", "cpp") else "text"
+                st.rerun()
+        except Exception as exc:
+            if credit_reserved:
+                st.warning("A free credit was reserved before processing. If Gemini failed, contact support to request a credit review.")
+            st.error(f"Could not process submission: {exc}")
+
+if st.session_state.processed_output:
+    st.subheader("Processed output")
+    st.code(st.session_state.processed_output, language=st.session_state.output_language)
+    st.download_button("Download output", st.session_state.processed_output, file_name="rewritten_output.txt", mime="text/plain")
+
+# -------------------- ADMIN PAYMENT REVIEW --------------------
+st.divider()
+with st.expander("Admin: review payments"):
+    if not SUPABASE_SERVICE_ROLE_KEY or not ADMIN_PASSWORD:
+        st.warning("Admin review is disabled. Configure SUPABASE_SERVICE_ROLE_KEY and ADMIN_PASSWORD in Streamlit Secrets.")
+    elif not st.session_state.admin_authenticated:
+        locked_until = st.session_state.admin_locked_until
+        if locked_until and dt.datetime.now(dt.timezone.utc) < locked_until:
+            st.warning("Admin login is temporarily locked after repeated failed attempts.")
+        else:
+            with st.form("admin_login"):
+                entered = st.text_input("Admin password", type="password")
+                unlock = st.form_submit_button("Unlock admin review")
+            if unlock:
+                if entered == ADMIN_PASSWORD:
+                    st.session_state.admin_authenticated = True
+                    st.session_state.admin_login_attempts = 0
+                    st.session_state.admin_locked_until = None
+                    st.rerun()
+                else:
+                    st.session_state.admin_login_attempts += 1
+                    if st.session_state.admin_login_attempts >= 5:
+                        st.session_state.admin_locked_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=10)
+                        st.session_state.admin_login_attempts = 0
+                    st.error("Incorrect admin password.")
+    else:
+        st.caption("Approve only after verifying payment in your UPI/bank app.")
+        review_utr = st.text_input("UTR to review", key="review_utr")
+        left, right = st.columns(2)
+        with left:
+            if st.button("Approve payment"):
+                try:
+                    review_payment(review_utr.strip(), True)
+                    st.success("Payment approved and premium activated.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Approval failed: {exc}")
+        with right:
+            if st.button("Reject payment"):
+                try:
+                    review_payment(review_utr.strip(), False)
+                    st.success("Payment rejected.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Rejection failed: {exc}")
+        if st.button("Lock admin review"):
+            st.session_state.admin_authenticated = False
+            st.rerun()
