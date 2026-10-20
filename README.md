@@ -1,41 +1,115 @@
-# DigiNebula 🚀
+# 🛡️ Campus Safeguard
 
-### Innovating Today. Building Tomorrow.
+### A DigiNebula Project
 
-Welcome to **DigiNebula**, a technology company focused on innovation, creativity, and building digital solutions for the future.
+Campus Safeguard is a Python-based web application built using Streamlit and Google's Gemini API. It provides an interactive interface for users to submit requests and receive AI-generated responses.
 
-We believe in using technology to solve problems, simplify processes, and create meaningful digital experiences.
+The project is developed under **DigiNebula**, with a focus on building useful and accessible technology solutions.
 
-## 🌌 About Us
+## ✨ Features
 
-DigiNebula is a technology-focused company with an interest in software development, artificial intelligence, and modern digital technologies. Our vision is to explore new possibilities through technology and transform ideas into practical solutions.
+- **AI-Powered Responses:** Uses the Gemini API to generate responses to user requests.
+- **Interactive Interface:** Built with Streamlit for a simple web-based experience.
+- **Credit System:** Includes a credit-based usage system.
+- **Response Processing:** Processes requests and displays generated results.
+- **Web Deployment:** Can be deployed using Streamlit Community Cloud.
 
-## 💡 Our Focus
+## 🛠️ Technologies Used
 
-- **Software Development** — Building useful and reliable digital applications.
-- **Artificial Intelligence** — Exploring intelligent tools and AI-powered solutions.
-- **Web Technologies** — Creating modern and interactive digital experiences.
-- **Innovation** — Turning creative ideas into technology-driven solutions.
-- **Digital Solutions** — Developing tools that aim to make everyday tasks easier.
+- Python
+- Streamlit
+- Google Gemini API
+- Requests
 
-## 🎯 Our Vision
+## 📂 Project Structure
 
-To grow into a technology company that creates innovative, accessible, and impactful digital solutions.
+```text
+DigiNebula/
+├── safeguard_bot_updated.py
+├── requirements.txt
+└── README.md
+```
 
-## 🚀 Our Mission
+## ⚙️ Installation and Setup
 
-To explore emerging technologies, develop practical software, and continuously improve the way people interact with digital tools.
+### 1. Clone the Repository
 
-## 🤝 Our Philosophy
+```bash
+git clone https://github.com/YOUR-USERNAME/DigiNebula.git
+```
 
-We believe every great innovation begins with an idea. Through creativity, continuous learning, and technology, DigiNebula aims to turn those ideas into reality.
+### 2. Open the Project Directory
 
-## 📬 Connect With Us
+```bash
+cd DigiNebula
+```
 
-- **GitHub:** [DigiNebula](https://github.com/)
-- **Website:** Coming soon
+### 3. Switch to the Project Branch
+
+```bash
+git checkout campus-safegaurd
+```
+
+### 4. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+Your `requirements.txt` should include:
+
+```text
+streamlit
+requests
+```
+
+### 5. Configure the Gemini API Key
+
+The application requires a Gemini API key.
+
+For local development, create `.streamlit/secrets.toml`:
+
+```toml
+GEMINI_API_KEY = "YOUR_API_KEY"
+```
+
+Replace `YOUR_API_KEY` with your own API key.
+
+**Important:** Never upload your actual API key or the `secrets.toml` file to GitHub.
+
+### 6. Run the Application
+
+```bash
+python -m streamlit run safeguard_bot_updated.py
+```
+
+Streamlit will provide a local URL where you can open the application in your browser.
+
+## ☁️ Deployment
+
+To deploy Campus Safeguard using Streamlit Community Cloud:
+
+1. Sign in to Streamlit Community Cloud.
+2. Connect your GitHub account.
+3. Select the `DigiNebula` repository.
+4. Choose the `campus-safegaurd` branch.
+5. Set the main file path to `safeguard_bot_updated.py`.
+6. Add `GEMINI_API_KEY` in the app's Secrets settings.
+7. Deploy the application.
+
+## 🔐 Security
+
+- Keep API keys and credentials private.
+- Never commit secret configuration files.
+- Avoid storing sensitive user information in publicly accessible files.
+- Review data storage and payment-related functionality before using the app in a real environment.
+
+## 🏢 Developed By
+
+**DigiNebula**
+
+*Ideas Beyond Limits. Technology Without Boundaries.*
 
 ---
 
-**DigiNebula**  
-*Ideas Beyond Limits. Technology Without Boundaries.* 🌌
+*Campus Safeguard is an evolving project. Features may change as development continues.*
