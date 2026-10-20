@@ -236,7 +236,10 @@ if not st.session_state.access_token:
                 if mode == "Create account":
                     data = auth_request("signup", {"email": email.strip(), "password": password})
                     if not data.get("access_token"):
-                        st.success("Account created. Confirm your email if required, then log in.")
+                        st.success(""🎉 Account Created Successfully!\n\n"
+                        "Welcome to Campus Safeguard by DigiNebula. "
+                        "Please check your email and verify your account to continue.""
+                        )
                     else:
                         st.session_state.access_token = data["access_token"]
                         st.session_state.refresh_token = data.get("refresh_token", "")
