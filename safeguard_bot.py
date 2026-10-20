@@ -302,8 +302,15 @@ if not premium and credits <= 0:
     st.stop()
 
 # -------------------- ASSIGNMENT REWRITER --------------------
-st.success(f"Premium active until {profile.get('premium_until')}") if premium else st.info(f"Free credits remaining: {credits}")
-uploaded = st.file_uploader("Upload assignment, code, photo, or PDF", type=["py", "java", "cpp", "txt", "png", "jpg", "jpeg", "pdf"])
+if premium:
+    st.success(f"Premium active until {profile.get('premium_until')}")
+else:
+    st.info(f"Free credits remaining: {credits}")
+
+uploaded = st.file_uploader(
+    "Upload assignment, code, photo, or PDF",
+    type=["py", "java", "cpp", "txt", "png", "jpg", "jpeg", "pdf"],
+)
 typed = st.text_area("Or paste assignment text/code", height=150)
 
 if st.button("Rewrite assignment", type="primary"):
@@ -353,6 +360,10 @@ if st.button("Rewrite assignment", type="primary"):
             st.error(f"Could not process submission: {exc}")
 
 if st.session_state.processed_output:
+    if st.button("Clear processed output"):
+        st.session_state.processed_output = ""
+        st.session_state.output_language = "text"
+        st.rerun()
     st.subheader("Processed output")
     st.code(st.session_state.processed_output, language=st.session_state.output_language)
     st.download_button("Download output", st.session_state.processed_output, file_name="rewritten_output.txt", mime="text/plain")
